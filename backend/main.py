@@ -1,15 +1,14 @@
 
 import asyncio
 import base64
-import io
 import json
 import os
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
 
 # Load environment variables from .env file
 load_dotenv()
@@ -19,11 +18,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in .env file")
 
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # --- AI Model Setup ---
-ANALYSIS_MODEL_NAME = "gemini-1.5-pro-latest"
-TTS_MODEL_NAME = "models/text-to-speech"
+ANALYSIS_MODEL_NAME = "gemini-3-flash-preview"
+TTS_MODEL_NAME = "gemini-3-flash-preview"
 
 
 # The system instruction for the AI model
@@ -57,29 +56,20 @@ Do not include markdown formatting (```json ... ```) in your response.
 Your entire response must be a single, valid JSON object.
 """
 
-generation_config = {
-    "temperature": 0.2,
-    "top_p": 0.95,
-    "top_k": 64,
-    "max_output_tokens": 8192,
-    "response_mime_type": "application/json",
-}
-
-safety_settings = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-]
-
-analysis_model = genai.GenerativeModel(
-    model_name=ANALYSIS_MODEL_NAME,
-    safety_settings=safety_settings,
-    generation_config=generation_config,
+generation_config = types.GenerateContentConfig(
+    temperature=0.2,
+    top_p=0.95,
+    top_k=64,
+    max_output_tokens=8192,
+    response_mime_type="application/json",
     system_instruction=SYSTEM_INSTRUCTION,
+    safety_settings=[
+        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
+        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
+        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
+        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
+    ],
 )
-
-tts_model = genai.GenerativeModel(TTS_MODEL_NAME)
 
 # --- FastAPI App ---
 app = FastAPI()
@@ -103,18 +93,19 @@ async def text_to_speech(text):
     """Converts text to speech and returns the audio data as base64."""
     try:
         print(f"Generating audio for: '{text}'")
-        response = await tts_model.generate_content_async(
-            f"Please say '{text}' in a clear and encouraging tone.",
-            stream=False
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=TTS_MODEL_NAME,
+            contents=f"Please say '{text}' in a clear and encouraging tone.",
         )
         # The API returns audio data directly. We need to find it in the response parts.
-        audio_part = next((part for part in response.parts if part.mime_type.startswith("audio/")), None)
-        if audio_part:
-            print("Audio generated successfully.")
-            return base64.b64encode(audio_part.data).decode('utf-8')
-        else:
-            print("TTS response did not contain audio data.")
-            return None
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                    print("Audio generated successfully.")
+                    return base64.b64encode(part.inline_data.data).decode('utf-8')
+        print("TTS response did not contain audio data.")
+        return None
     except Exception as e:
         print(f"Error during text-to-speech generation: {e}")
         return None
@@ -128,13 +119,13 @@ async def websocket_session(websocket: WebSocket):
     await websocket.accept()
     print("WebSocket connection accepted.")
 
-    chat_session = analysis_model.start_chat(history=[])
+    chat = client.chats.create(model=ANALYSIS_MODEL_NAME, config=generation_config)
 
     try:
         while True:
             message_json = await websocket.receive_json()
             message_type = message_json.get("type")
-            
+
             if message_type != "VIDEO_FRAME":
                 print(f"Received non-video message, skipping: {message_type}")
                 continue
@@ -142,17 +133,17 @@ async def websocket_session(websocket: WebSocket):
             base64_image = message_json.get("data")
             if not base64_image:
                 continue
-            
+
             try:
                 image_bytes = base64.b64decode(base64_image)
-                image = Image.open(io.BytesIO(image_bytes))
             except Exception as e:
                 print(f"Error decoding image: {e}")
                 continue
 
             try:
                 print("Sending frame to Gemini...")
-                response = await chat_session.send_message_async(image, stream=False)
+                image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+                response = await asyncio.to_thread(chat.send_message, image_part)
                 response_text = response.text
                 print(f"Received from Gemini: {response_text}")
 

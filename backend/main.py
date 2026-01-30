@@ -52,7 +52,7 @@ Example for poor form:
 }
 
 Analyze each frame independently and provide immediate, relevant feedback.
-Do not include markdown formatting (```json ... ```) in your response.
+Do not include markdown formatting in your response.
 Your entire response must be a single, valid JSON object.
 """
 

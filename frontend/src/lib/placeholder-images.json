@@ -1,0 +1,10 @@
+{
+  "placeholderImages": [
+    {
+      "id": "webcam-background",
+      "description": "A stylized image of a webcam on a dark, textured surface, used as a background for the idle state.",
+      "imageUrl": "https://images.unsplash.com/photo-1702726001096-096efcf640b8?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHw3fHx3ZWJjYW0lMjBkYXJrfGVufDB8fHx8MTc2OTI1MTUxNHww&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "webcam dark"
+    }
+  ]
+}

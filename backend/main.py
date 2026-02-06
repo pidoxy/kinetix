@@ -1,10 +1,11 @@
-
 import asyncio
 import base64
 import json
 import os
 import time
 from datetime import datetime, timezone
+from pydantic import BaseModel
+from typing import List
 
 from google import genai
 from google.genai import types
@@ -20,11 +21,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not found in .env file")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Use the new GenerativeModel API
+genai.configure(api_key=GEMINI_API_KEY)
+
 
 # --- AI Model Setup ---
-ANALYSIS_MODEL_NAME = "gemini-3-flash-preview"
-TTS_MODEL_NAME = "gemini-3-flash-preview"
+ANALYSIS_MODEL_NAME = "gemini-3-flash-preview"  # Gemini 3 for real-time video analysis
+TTS_MODEL_NAME = "gemini-2.5-flash-preview-tts"  # Gemini TTS model for speech generation
 
 
 # The system instruction for the AI model
@@ -35,11 +38,11 @@ INPUT: Real-time video frames of a user exercising.
 OUTPUT: A single valid JSON object (no markdown).
 
 YOUR DUAL ROLE:
-1. THE ANALYST (Internal): Analyze biomechanics using precise medical terminology. Identify risks using proper anatomical terms (valgus, kyphosis, lordosis, protraction, etc.). This goes into "thought_signature".
+1. THE ANALYST (Internal): Analyze biomechanics using standard, precise physical therapy and kinesiology terms. Focus on observable movements and potential risks (e.g., 'valgus collapse', 'lumbar flexion under load', 'scapular elevation'). Avoid overly academic or obscure jargon. This goes into the "thought_signature".
 2. THE COACH (External): Translate your analysis into simple, punchy, 5th-grade reading level commands. Use METAPHORS and ANALOGIES. This goes into "speech_text".
 
 RULES FOR "speech_text":
-- NEVER use medical words: valgus, kyphosis, lordosis, protraction, extension, flexion, scapular, cervical, thoracic, lumbar, anterior, posterior.
+- NEVER use technical or medical jargon. This includes terms like: valgus, kyphosis, lordosis, protraction, extension, flexion, scapular, cervical, thoracic, lumbar, anterior, posterior, cranial, kinetic chain.
 - ALWAYS use simple cues: "Chest up", "Knees out", "Squeeze your glutes", "Chin down", "Show me the logo on your shirt".
 - Keep it under 10 words. The user is out of breath.
 - If form is dangerous (RED), start with "Stop!" or "Careful!".
@@ -104,42 +107,46 @@ RECOMMENDATION_PROMPT_TEMPLATE = """
 You are an expert personal trainer. Based on the user's identified areas for improvement from their last workout, suggest 2-3 specific, corrective exercises.
 
 AREAS FOR IMPROVEMENT:
-{areas_for_improvement}
+- {areas_for_improvement}
 
-For each exercise, provide a name and a brief, simple explanation of how to do it and why it helps (2-3 sentences max).
-Return a JSON object with a single key "personalized_recommendations", which is an array of objects.
+For each exercise, provide a name and a brief, simple explanation of why it helps.
+Return a JSON object with a single key "recommendations", which is an array of objects.
 
 JSON FORMAT:
 {{
-  "personalized_recommendations": [
-    {{ "name": "Exercise Name", "description": "Simple description of how to do this exercise and why it helps fix the issue." }},
+  "recommendations": [
+    {{ "name": "Exercise Name", "description": "Simple description of why this exercise is helpful." }},
     ...
   ]
 }}
 
 Example:
 {{
-  "personalized_recommendations": [
-    {{ "name": "Glute Bridges", "description": "Lie on your back with knees bent, then lift your hips up and squeeze your glutes. This strengthens your glutes to help keep your knees from caving in." }},
-    {{ "name": "Banded Side Steps", "description": "Put a resistance band around your knees and take small steps sideways. This activates the muscles on the outside of your hips for better stability." }}
+  "recommendations": [
+    {{ "name": "Glute Bridges", "description": "Strengthens your glutes to help keep your knees from caving in." }},
+    {{ "name": "Banded Side Steps", "description": "Activates the muscles on the outside of your hips for better stability." }}
   ]
 }}
 
-Keep it simple and actionable. Your entire response must be a single valid JSON object.
+Your entire response must be a single valid JSON object.
 """
 
-generation_config = types.GenerateContentConfig(
-    temperature=0.2,
-    top_p=0.95,
-    top_k=64,
-    max_output_tokens=8192,
-    response_mime_type="application/json",
+
+analysis_model = genai.GenerativeModel(
+    ANALYSIS_MODEL_NAME,
     system_instruction=SYSTEM_INSTRUCTION,
-    safety_settings=[
-        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
-        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
-        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
-        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
+    generation_config={
+        "temperature": 0.2,
+        "top_p": 0.95,
+        "top_k": 64,
+        "max_output_tokens": 8192,
+        "response_mime_type": "application/json",
+    },
+     safety_settings=[
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ],
 )
 
@@ -162,22 +169,38 @@ def read_root():
 
 
 async def text_to_speech(text):
-    """Converts text to speech and returns the audio data as base64."""
+    """Converts text to speech using Gemini TTS and returns the audio data as base64."""
     try:
         print(f"Generating audio for: '{text}'")
+
+        # Create a client for TTS
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        # Use Gemini TTS with audio response modality
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=TTS_MODEL_NAME,
-            contents=f"Please say '{text}' in a clear and encouraging tone.",
+            contents=f"Say naturally: {text}",
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name="Kore",  # Energetic coaching voice
+                        )
+                    )
+                ),
+            )
         )
-        # The API returns audio data directly. We need to find it in the response parts.
+
+        # Extract audio data from response
         if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                    print("Audio generated successfully.")
-                    return base64.b64encode(part.inline_data.data).decode('utf-8')
-        print("TTS response did not contain audio data.")
-        return None
+            audio_data = response.candidates[0].content.parts[0].inline_data.data
+            print("Audio generated successfully.")
+            return base64.b64encode(audio_data).decode('utf-8')
+        else:
+            print("TTS response did not contain audio data.")
+            return None
     except Exception as e:
         print(f"Error during text-to-speech generation: {e}")
         return None
@@ -267,6 +290,15 @@ async def generate_session_summary(chat, session_data):
         return base_summary
 
     try:
+        # Switch the chat session to use the summary prompt
+        summary_model = genai.GenerativeModel(
+            ANALYSIS_MODEL_NAME,
+            generation_config={
+                "response_mime_type": "application/json",
+            }
+        )
+        summary_chat = summary_model.start_chat()
+
         prompt = SUMMARY_PROMPT_TEMPLATE.format(
             duration_formatted=duration_formatted,
             duration_seconds=int(duration),
@@ -280,7 +312,7 @@ async def generate_session_summary(chat, session_data):
             top_corrections=", ".join(top_corrections) if top_corrections else "None",
         )
 
-        response = await asyncio.to_thread(chat.send_message, prompt)
+        response = await summary_chat.send_message_async(prompt)
         response_text = response.text
         print(f"Summary response from Gemini: {response_text}")
 
@@ -292,25 +324,30 @@ async def generate_session_summary(chat, session_data):
             "recommendations": ai_summary.get("recommendations", []),
             "encouragement": ai_summary.get("encouragement", ""),
         }
-
-        # STAGE 2: Generate personalized exercise recommendations based on areas for improvement
+        
+        # Generate personalized recommendations
         try:
-            areas_for_improvement = ai_summary.get("areas_for_improvement", [])
-            if areas_for_improvement:
-                areas_str = "\n- ".join(areas_for_improvement)
+            if "areas_for_improvement" in ai_summary and ai_summary["areas_for_improvement"]:
+                areas_str = ", ".join(ai_summary["areas_for_improvement"])
                 rec_prompt = RECOMMENDATION_PROMPT_TEMPLATE.format(areas_for_improvement=areas_str)
-
-                print("Generating personalized recommendations...")
-                rec_response = await asyncio.to_thread(chat.send_message, rec_prompt)
+                
+                rec_model = genai.GenerativeModel(
+                    ANALYSIS_MODEL_NAME,
+                    generation_config={ "response_mime_type": "application/json" }
+                )
+                
+                rec_response = await rec_model.generate_content_async(rec_prompt)
                 rec_response_text = rec_response.text
                 print(f"Recommendation response from Gemini: {rec_response_text}")
 
                 rec_data = json.loads(rec_response_text)
-                base_summary["personalized_recommendations"] = rec_data.get("personalized_recommendations", [])
-        except Exception as e:
-            print(f"Error generating personalized recommendations: {e}")
-            # personalized_recommendations remains empty list
+                if "recommendations" in rec_data:
+                    base_summary["personalized_recommendations"] = rec_data["recommendations"]
 
+        except Exception as e:
+            print(f"Could not generate personalized recommendations: {e}")
+            # personalized_recommendations will remain an empty list
+            
     except Exception as e:
         print(f"Error generating AI summary: {e}")
         # ai_summary stays None — fallback to stats-only
@@ -326,7 +363,7 @@ async def websocket_session(websocket: WebSocket):
     await websocket.accept()
     print("WebSocket connection accepted.")
 
-    chat = client.chats.create(model=ANALYSIS_MODEL_NAME, config=generation_config)
+    chat = analysis_model.start_chat(history=[])
 
     session_data = {
         "start_time": time.time(),
@@ -364,14 +401,14 @@ async def websocket_session(websocket: WebSocket):
 
             try:
                 image_bytes = base64.b64decode(base64_image)
+                image_part = {"mime_type": "image/jpeg", "data": image_bytes}
             except Exception as e:
                 print(f"Error decoding image: {e}")
                 continue
 
             try:
                 print("Sending frame to Gemini...")
-                image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-                response = await asyncio.to_thread(chat.send_message, image_part)
+                response = await chat.send_message_async(image_part, stream=False)
                 response_text = response.text
                 print(f"Received from Gemini: {response_text}")
 
@@ -387,6 +424,7 @@ async def websocket_session(websocket: WebSocket):
                     session_data["red_count"] += 1
                 elif status == "WAITING":
                     session_data["waiting_count"] += 1
+
                 if len(session_data["analyses"]) < 500:
                     session_data["analyses"].append({
                         "status": status,
@@ -429,15 +467,17 @@ async def websocket_session(websocket: WebSocket):
               f"green: {session_data['green_count']}, yellow: {session_data['yellow_count']}, "
               f"red: {session_data['red_count']}, waiting: {session_data['waiting_count']}")
         try:
-            await websocket.close()
+            if not websocket.client_state == 'DISCONNECTED':
+                await websocket.close()
         except Exception:
             pass  # connection already closed
 
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
+    uvicorn.run(app, host="0.0.0.0", port=8080)
     
+    
+    
+
     
